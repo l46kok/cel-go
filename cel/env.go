@@ -49,6 +49,10 @@ func (ast *Ast) Expr() *exprpb.Expr {
 	return ast.expr
 }
 
+func (ast *Ast) GetType(id int64) *exprpb.Type {
+	return ast.typeMap[id]
+}
+
 // IsChecked returns whether the Ast value has been successfully type-checked.
 func (ast *Ast) IsChecked() bool {
 	return ast.typeMap != nil && len(ast.typeMap) > 0
