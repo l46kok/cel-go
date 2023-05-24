@@ -107,6 +107,7 @@ type Env struct {
 	features        map[int]bool
 	appliedFeatures map[int]bool
 	libraries       map[string]bool
+	validators      []*ASTValidator
 
 	// Internal parser representation
 	prsr     *parser.Parser

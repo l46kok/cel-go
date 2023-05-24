@@ -1,10 +1,8 @@
-package validator
+package cel
 
 import (
 	"fmt"
 	"testing"
-
-	"github.com/google/cel-go/cel"
 )
 
 var testCases = []testInfo{
@@ -25,12 +23,15 @@ type testInfo struct {
 func Test(t *testing.T) {
 
 	// Variables used within this expression environment.
-	env, err := cel.NewEnv(
-		cel.Variable("A", cel.StringType),
+	env, err := NewEnv(
+		Variable("A", StringType),
+		ASTValidators(NewHomogeneousLiteralValidator()),
 	)
 	if err != nil {
 		t.Fatalf("environment creation error: %s\n", err)
 	}
+
+	validator, _ := env.NewValidator()
 	for i, tst := range testCases {
 		name := fmt.Sprintf("%d %s", i, tst.in)
 		tc := tst
@@ -39,10 +40,6 @@ func Test(t *testing.T) {
 			if iss.Err() != nil {
 				t.Fatal(iss.Err())
 			}
-
-			validator, _ := NewValidator(
-				ASTVisitors(NewHomogeneousLiteralValidator()),
-			)
 
 			issues := validator.Validate(ast)
 			fmt.Println(issues)
