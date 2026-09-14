@@ -15,22 +15,61 @@
 package cost_test
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
 
-	"cel.dev/cel-go/checker"
-	"cel.dev/cel-go/common"
-	"cel.dev/cel-go/common/containers"
+	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/common/ast"
 	"cel.dev/cel-go/common/cost"
 	"cel.dev/cel-go/common/decls"
 	"cel.dev/cel-go/common/overloads"
-	"cel.dev/cel-go/common/stdlib"
 	"cel.dev/cel-go/common/types"
-	"cel.dev/cel-go/parser"
+	"cel.dev/cel-go/common/types/ref"
+	"cel.dev/cel-go/ext"
 
 	proto3pb "cel.dev/cel-go/test/proto3pb"
 )
+
+// testCelEnv is the CEL environment shared by the cost estimator and tracker tests.
+//
+// Beyond the standard library it supplies the ext macros and functions these tests
+// exercise: cel.bind from ext.Bindings, and the two-variable comprehensions (all, exists,
+// existsOne, transformList, transformMap, transformMapEntry) from ext.TwoVarComprehensions
+// along with the cel.@mapInsert function they expand to. These were previously hand-rolled
+// in this file.
+var testCelEnv = func() *cel.Env {
+	env, err := cel.NewEnv(
+		cel.Types(&proto3pb.TestAllTypes{}),
+		cel.CrossTypeNumericComparisons(true),
+		cel.OptionalTypes(),
+		ext.Bindings(),
+		ext.TwoVarComprehensions(),
+		cel.Function("max",
+			cel.MemberOverload("list_bytes_max",
+				[]*cel.Type{cel.ListType(cel.BytesType)}, cel.BytesType)),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("cel.NewEnv() failed: %v", err))
+	}
+	return env
+}()
+
+// compile type checks an expression against the shared test environment extended with the
+// given variable declarations, and returns the checked AST.
+func compile(t *testing.T, expr string, vars ...*decls.VariableDecl) *ast.AST {
+	t.Helper()
+	env, err := testCelEnv.Extend(cel.VariableDecls(vars...))
+	if err != nil {
+		t.Fatalf("env.Extend() failed: %v", err)
+	}
+	checked, iss := env.Compile(expr)
+	if iss.Err() != nil {
+		t.Fatalf("env.Compile(%q) failed: %v", expr, iss.Err())
+	}
+	return checked.NativeRep()
+}
 
 func TestCost(t *testing.T) {
 	allTypes := types.NewObjectType("google.expr.proto3.test.TestAllTypes")
@@ -48,7 +87,7 @@ func TestCost(t *testing.T) {
 		expr    string
 		vars    []*decls.VariableDecl
 		hints   map[string]uint64
-		options []cost.CostOption
+		options []cost.Option
 		wanted  cost.CostEstimate
 	}{
 		{
@@ -80,7 +119,7 @@ func TestCost(t *testing.T) {
 			expr:    `has(input.single_int32)`,
 			vars:    []*decls.VariableDecl{decls.NewVariable("input", types.NewObjectType("google.expr.proto3.test.TestAllTypes"))},
 			wanted:  cost.CostEstimate{Min: 1, Max: 1},
-			options: []cost.CostOption{cost.PresenceTestHasCost(false)},
+			options: []cost.Option{cost.PresenceTestHasCost(false)},
 		},
 		{
 			name:   "select: field test only",
@@ -93,14 +132,14 @@ func TestCost(t *testing.T) {
 			expr:    `has(input.testAttr.nestedAttr)`,
 			vars:    []*decls.VariableDecl{decls.NewVariable("input", nestedMap)},
 			wanted:  cost.CostEstimate{Min: 3, Max: 3},
-			options: []cost.CostOption{cost.PresenceTestHasCost(true)},
+			options: []cost.Option{cost.PresenceTestHasCost(true)},
 		},
 		{
 			name:    "select: non-proto field test no has() cost",
 			expr:    `has(input.testAttr.nestedAttr)`,
 			vars:    []*decls.VariableDecl{decls.NewVariable("input", nestedMap)},
 			wanted:  cost.CostEstimate{Min: 2, Max: 2},
-			options: []cost.CostOption{cost.PresenceTestHasCost(false)},
+			options: []cost.Option{cost.PresenceTestHasCost(false)},
 		},
 		{
 			name:   "select: non-proto field test",
@@ -445,7 +484,7 @@ func TestCost(t *testing.T) {
 				decls.NewVariable("str2", types.StringType),
 			},
 			hints: map[string]uint64{"str1": 10, "str2": 10},
-			options: []cost.CostOption{
+			options: []cost.Option{
 				cost.OverloadCostEstimate(overloads.ContainsString,
 					func(estimator cost.Estimator, target *cost.AstNode, args []cost.AstNode) *cost.CallEstimate {
 						if target != nil && len(args) == 1 {
@@ -577,17 +616,17 @@ func TestCost(t *testing.T) {
 		{
 			name:   ".map list literal selection",
 			expr:   `[1,2,3,4,5].map(x, x)[4]`,
-			wanted: cost.CostEstimate{Min: 87, Max: 87},
+			wanted: cost.CostEstimate{Min: 88, Max: 88},
 		},
 		{
 			name:   "nested array selection",
 			expr:   `[[1,2],[1,2],[1,2],[1,2],[1,2]][4]`,
-			wanted: cost.CostEstimate{Min: 61, Max: 61},
+			wanted: cost.CostEstimate{Min: 62, Max: 62},
 		},
 		{
 			name:   "nested map selection",
 			expr:   `{'a': [1,2], 'b': [1,2], 'c': [1,2], 'd': [1,2], 'e': [1,2]}.b`,
-			wanted: cost.CostEstimate{Min: 81, Max: 81},
+			wanted: cost.CostEstimate{Min: 82, Max: 82},
 		},
 		{
 			name:   "comprehension on nested list",
@@ -632,12 +671,47 @@ func TestCost(t *testing.T) {
 		{
 			name:   "literal map access",
 			expr:   `{'hello': 'hi'}['hello'] != {'hello': 'bye'}['hello']`,
-			wanted: cost.CostEstimate{Min: 63, Max: 63},
+			wanted: cost.CostEstimate{Min: 65, Max: 65},
 		},
 		{
 			name:   "literal list access",
 			expr:   `['hello', 'hi'][0] != ['hello', 'bye'][1]`,
-			wanted: cost.CostEstimate{Min: 23, Max: 23},
+			wanted: cost.CostEstimate{Min: 25, Max: 25},
+		},
+		{
+			// Optional index over a computed operand costs the same as its non-optional
+			// counterpart: the planner qualifies a relative attribute in both cases.
+			name:   "literal map optional access",
+			expr:   `{'hello': 'hi'}[?'hello']`,
+			wanted: cost.CostEstimate{Min: 32, Max: 32},
+		},
+		{
+			name:   "literal map optional select",
+			expr:   `{'hello': 'hi'}.?hello`,
+			wanted: cost.CostEstimate{Min: 32, Max: 32},
+		},
+		{
+			name:   "literal list optional access",
+			expr:   `['hello', 'hi'][?0]`,
+			wanted: cost.CostEstimate{Min: 12, Max: 12},
+		},
+		{
+			// An optional select extends the attribute chain, so the trailing selection
+			// must not be charged an extra attribute resolution.
+			name: "optional select chain",
+			expr: `self.?val1.val2`,
+			vars: []*decls.VariableDecl{
+				decls.NewVariable("self", types.NewMapType(types.StringType, types.DynType)),
+			},
+			wanted: cost.CostEstimate{Min: 3, Max: 3},
+		},
+		{
+			name: "optional index chain",
+			expr: `self[?'val1'].val2`,
+			vars: []*decls.VariableDecl{
+				decls.NewVariable("self", types.NewMapType(types.StringType, types.DynType)),
+			},
+			wanted: cost.CostEstimate{Min: 3, Max: 3},
 		},
 		{
 			name:   "type call",
@@ -658,17 +732,17 @@ func TestCost(t *testing.T) {
 			vars: []*decls.VariableDecl{
 				decls.NewVariable("self", types.NewMapType(types.StringType, types.IntType)),
 			},
-			wanted: cost.CostEstimate{Min: 5, Max: 1844674407370955268},
+			wanted: cost.CostEstimate{Min: 5, Max: 5},
 		},
 		{
 			name:   "type literal equality cost",
 			expr:   `type(1) == int`,
-			wanted: cost.CostEstimate{Min: 3, Max: 1844674407370955266},
+			wanted: cost.CostEstimate{Min: 3, Max: 3},
 		},
 		{
 			name:   "type variable equality cost",
 			expr:   `type(1) == int`,
-			wanted: cost.CostEstimate{Min: 3, Max: 1844674407370955266},
+			wanted: cost.CostEstimate{Min: 3, Max: 3},
 		},
 		{
 			name: "namespace variable equality",
@@ -729,7 +803,7 @@ func TestCost(t *testing.T) {
 		{
 			name: "bytes list max",
 			expr: "[bytes('012345678901'), bytes('012345678901'), bytes('012345678901'), bytes('012345678901'), bytes('012345678901')].max()",
-			options: []cost.CostOption{
+			options: []cost.Option{
 				cost.OverloadCostEstimate("list_bytes_max",
 					func(estimator cost.Estimator, target *cost.AstNode, args []cost.AstNode) *cost.CallEstimate {
 						if target != nil {
@@ -751,6 +825,154 @@ func TestCost(t *testing.T) {
 			},
 			wanted: cost.CostEstimate{Min: 25, Max: 35},
 		},
+		// cel.bind test cases
+		{
+			name:   "bind: literal init and scalar result",
+			expr:   `cel.bind(a, 'hello', a + '!')`,
+			wanted: cost.CostEstimate{Min: 12, Max: 12},
+		},
+		{
+			name:   "bind: nested binds",
+			expr:   `cel.bind(a, 'hello!', cel.bind(b, 'goodbye', a + ' and, ' + b))`,
+			wanted: cost.CostEstimate{Min: 26, Max: 26},
+		},
+		{
+			name:   "bind: shadowed bind",
+			expr:   `cel.bind(a, cel.bind(a, 'world', a + '!'), 'hello ' + a)`,
+			wanted: cost.CostEstimate{Min: 25, Max: 25},
+		},
+		{
+			name:   "bind: with variable list and index",
+			expr:   `cel.bind(a, input, a[0])`,
+			vars:   []*decls.VariableDecl{decls.NewVariable("input", intList)},
+			wanted: cost.CostEstimate{Min: 13, Max: 13},
+		},
+		{
+			name:   "bind: with variable map and index",
+			expr:   `cel.bind(m, input, m['key'])`,
+			vars:   []*decls.VariableDecl{decls.NewVariable("input", types.NewMapType(types.StringType, types.StringType))},
+			wanted: cost.CostEstimate{Min: 13, Max: 13},
+		},
+		{
+			name:   "bind: with comprehension and size hints",
+			vars:   []*decls.VariableDecl{decls.NewVariable("input", allList)},
+			hints:  map[string]uint64{"input": 100},
+			expr:   `cel.bind(a, input, a.all(x, true))`,
+			wanted: cost.CostEstimate{Min: 13, Max: 313},
+		},
+		{
+			name:   "bind: nested with list and size hints",
+			vars:   []*decls.VariableDecl{decls.NewVariable("input", nestedList)},
+			hints:  map[string]uint64{"input": 50, "input.@items": 10},
+			expr:   `cel.bind(a, input, a.all(x, x.all(y, true)))`,
+			wanted: cost.CostEstimate{Min: 13, Max: 1763},
+		},
+		{
+			name:   "bind: unused bind variable",
+			expr:   `cel.bind(a, [1, 2, 3], 42)`,
+			wanted: cost.CostEstimate{Min: 20, Max: 20},
+		},
+		{
+			name:   "bind: derived size propagation to comprehension",
+			expr:   `cel.bind(v, [1, 2, 3], v.all(x, true))`,
+			wanted: cost.CostEstimate{Min: 31, Max: 31},
+		},
+
+		// Two-variable comprehension test cases
+		{
+			name:   "two-var all: list literal",
+			expr:   `[1, 2, 3].all(i, v, i < v)`,
+			wanted: cost.CostEstimate{Min: 20, Max: 29},
+		},
+		{
+			name:   "two-var all: list variable with hints",
+			vars:   []*decls.VariableDecl{decls.NewVariable("input", allList)},
+			hints:  map[string]uint64{"input": 100},
+			expr:   `input.all(i, v, true)`,
+			wanted: cost.CostEstimate{Min: 2, Max: 302},
+		},
+		{
+			name:   "two-var all: map literal",
+			expr:   `{"a": 1, "b": 2}.all(k, v, k != "" && v > 0)`,
+			wanted: cost.CostEstimate{Min: 37, Max: 43},
+		},
+		{
+			name:   "two-var all: map variable with hints",
+			vars:   []*decls.VariableDecl{decls.NewVariable("input", allMap)},
+			hints:  map[string]uint64{"input": 50},
+			expr:   `input.all(k, v, true)`,
+			wanted: cost.CostEstimate{Min: 2, Max: 152},
+		},
+		{
+			name:   "two-var exists: list literal",
+			expr:   `[1, 2, 3].exists(i, v, i == 1 && v == 2)`,
+			wanted: cost.CostEstimate{Min: 23, Max: 35},
+		},
+		{
+			name:   "two-var exists: map literal",
+			expr:   `{"a": 1, "b": 2}.exists(k, v, k == "a" && v == 1)`,
+			wanted: cost.CostEstimate{Min: 39, Max: 47},
+		},
+		{
+			name:   "two-var existsOne: list literal",
+			expr:   `[1, 2, 3].existsOne(i, v, v == 1)`,
+			wanted: cost.CostEstimate{Min: 21, Max: 24},
+		},
+		{
+			name:   "two-var exists_one: list literal",
+			expr:   `[1, 2, 3].exists_one(i, v, v == 1)`,
+			wanted: cost.CostEstimate{Min: 21, Max: 24},
+		},
+		{
+			name:   "two-var transformList: 3-arg list literal",
+			expr:   `[1, 2, 3].transformList(i, v, i + v)`,
+			wanted: cost.CostEstimate{Min: 66, Max: 66},
+		},
+		{
+			name:   "two-var transformList: 4-arg with filter list literal",
+			expr:   `[1, 2, 3].transformList(i, v, i % 2 == 0, i + v)`,
+			wanted: cost.CostEstimate{Min: 33, Max: 75},
+		},
+		{
+			name:   "two-var transformList: 3-arg map literal",
+			expr:   `{"a": 1, "b": 2}.transformList(k, v, k)`,
+			wanted: cost.CostEstimate{Min: 67, Max: 67},
+		},
+		{
+			name:   "two-var transformMap: 3-arg map literal",
+			expr:   `{"a": 1, "b": 2}.transformMap(k, v, v + 1)`,
+			wanted: cost.CostEstimate{Min: 71, Max: 71},
+		},
+		{
+			name:   "two-var transformMap: 4-arg with filter map literal",
+			expr:   `{"a": 1, "b": 2}.transformMap(k, v, v > 1, v + 1)`,
+			wanted: cost.CostEstimate{Min: 67, Max: 75},
+		},
+		{
+			name:   "two-var transformMapEntry: 3-arg map literal",
+			expr:   `{"a": 1, "b": 2}.transformMapEntry(k, v, {v: k})`,
+			wanted: cost.CostEstimate{Min: 129, Max: 129},
+		},
+		{
+			name:   "two-var transformMapEntry: 4-arg with filter map literal",
+			expr:   `{"a": 1, "b": 2}.transformMapEntry(k, v, v > 1, {v: k})`,
+			wanted: cost.CostEstimate{Min: 67, Max: 133},
+		},
+		{
+			name:   "two-var nested all",
+			expr:   `[1, 2].all(i, v, [1, 2].all(j, w, i + j < v + w))`,
+			wanted: cost.CostEstimate{Min: 17, Max: 79},
+		},
+		{
+			name:   "bind with two-var comprehension",
+			expr:   `cel.bind(l, [1, 2, 3], l.all(i, v, i < v))`,
+			wanted: cost.CostEstimate{Min: 31, Max: 40},
+		},
+		{
+			name:   "bind with two-var transformList",
+			expr:   `cel.bind(m, {"a": 1, "b": 2}, m.transformList(k, v, k))`,
+			wanted: cost.CostEstimate{Min: 78, Max: 78},
+		},
 	}
 
 	for _, tst := range cases {
@@ -759,44 +981,7 @@ func TestCost(t *testing.T) {
 			if tc.hints == nil {
 				tc.hints = map[string]uint64{}
 			}
-			p, err := parser.NewParser(parser.Macros(parser.AllMacros...))
-			if err != nil {
-				t.Fatalf("parser.NewParser() failed: %v", err)
-			}
-			src := common.NewStringSource(tc.expr, "<input>")
-			pe, errs := p.Parse(src)
-			if len(errs.GetErrors()) != 0 {
-				t.Fatalf("parser.Parse(%v) failed: %v", tc.expr, errs.ToDisplayString())
-			}
-			reg, err := types.NewRegistry(types.ProtoTypeDefs(&proto3pb.TestAllTypes{}))
-			if err != nil {
-				t.Fatalf("types.NewRegistry(...) failed: %v", err)
-			}
-
-			e, err := checker.NewEnv(containers.DefaultContainer, reg)
-			if err != nil {
-				t.Fatalf("checker.NewEnv() failed: %v", err)
-			}
-			err = e.AddFunctions(stdlib.Functions()...)
-			if err != nil {
-				t.Fatalf("environment creation error: %v", err)
-			}
-			maxFunc, _ := decls.NewFunction("max",
-				decls.MemberOverload("list_bytes_max",
-					[]*types.Type{types.NewListType(types.BytesType)},
-					types.BytesType))
-			err = e.AddFunctions(maxFunc)
-			if err != nil {
-				t.Fatalf("environment creation error: %v", err)
-			}
-			err = e.AddIdents(tc.vars...)
-			if err != nil {
-				t.Fatalf("environment creation error: %s\n", err)
-			}
-			checked, errs := checker.Check(pe, src, e)
-			if len(errs.GetErrors()) != 0 {
-				t.Fatalf("Check(%s) failed: %v", tc.expr, errs.ToDisplayString())
-			}
+			checked := compile(t, tc.expr, tc.vars...)
 			est, err := cost.Cost(checked, testCostEstimator{hints: tc.hints}, tc.options...)
 			if err != nil {
 				t.Fatalf("Cost() failed: %v", err)
@@ -868,4 +1053,38 @@ func sizeEstimate(estimator cost.Estimator, t cost.AstNode) cost.SizeEstimate {
 		return *sz
 	}
 	return cost.SizeEstimate{Min: 0, Max: math.MaxUint64}
+}
+
+type testCustomSizingStrategy struct{}
+
+func (testCustomSizingStrategy) EstimateSize(ctx cost.EstimateContext, node cost.AstNode) (cost.SizeEstimate, bool) {
+	if node.Path() != nil && len(node.Path()) > 0 && node.Path()[0] == "custom_str" {
+		return cost.SizeEstimate{Min: 10, Max: 20}, true
+	}
+	if node.Path() != nil && len(node.Path()) > 0 && node.Path()[0] == "custom_list" {
+		return cost.SizeEstimate{Min: 1, Max: 5, Elem: &cost.SizeEstimate{Min: 15, Max: 30}}, true
+	}
+	return cost.SizeEstimate{}, false
+}
+
+func (testCustomSizingStrategy) TrackSize(ctx cost.TrackContext, value ref.Val) (uint64, bool) {
+	return cost.ActualSize(value), true
+}
+
+func TestCustomSizingStrategy(t *testing.T) {
+	checked := compile(t, "custom_str.contains('abc')",
+		decls.NewVariable("custom_str", types.StringType))
+
+	res, err := cost.Cost(checked, nil, cost.EstimateSizingStrategy(testCustomSizingStrategy{}))
+	if err != nil {
+		t.Fatalf("Cost() failed: %v", err)
+	}
+	// 'abc' has length 3, cost traversal factor 0.1 -> ceil(3 * 0.1) = 1
+	// custom_str has min 10, max 20 -> min ceil(10 * 0.1) = 1, max ceil(20 * 0.1) = 2
+	// contains cost: min 1 * 1 = 1, max 2 * 1 = 2
+	// ident cost = 1
+	// total = ident(1) + call(min 1, max 2) = min 2, max 3
+	if res.Min != 2 || res.Max != 3 {
+		t.Errorf("got cost %v, wanted {Min: 2, Max: 3}", res)
+	}
 }
