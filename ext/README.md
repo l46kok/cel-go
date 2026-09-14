@@ -613,6 +613,10 @@ Examples:
 
 Applies a transformation to the optional's value if it holds one, and wraps the
 result in an optional. An optional which holds no value is returned unchanged.
+Starting in **OptionalTypes library version 4**, `optMap` avoids evaluating
+complex target expressions more than once. The change for more
+efficient evaluation alters the cost model in a backward incompatible manner,
+hhence the versioned rollout.
 
     <optional(T)>.optMap(<varName>, <expr>) -> <optional(U)>
 
@@ -628,7 +632,10 @@ Examples:
 Applies a transformation to the optional's value if it holds one, and returns
 the result. Unlike `optMap`, the transformation must itself produce an
 optional, which makes it possible to express results that may be empty in ways
-`optMap` cannot.
+`optMap` cannot. Starting in **OptionalTypes library version 4**, `optFlatMap`
+avoids evaluating complex target expressions more than once. The change for more
+efficient evaluation alters the cost model in a backward incompatible manner,
+hence the versioned rollout.
 
     <optional(T)>.optFlatMap(<varName>, <expr>) -> <optional(U)>
 

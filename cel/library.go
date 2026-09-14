@@ -319,24 +319,38 @@ func (*stdLibrary) ProgramOptions() []ProgramOption {
 //
 // # OptMap
 //
-// Apply a transformation to the optional's underlying value if it is not empty
-// and return an optional typed result based on the transformation. The
-// transformation expression type must return a type T which is wrapped into
-// an optional.
+// Applies a transformation to the optional's value if it holds one, and wraps the
+// result in an optional. An optional which holds no value is returned unchanged.
+// Starting in **OptionalTypes library version 4**, `optMap` avoids evaluating
+// complex target expressions more than once. The change for more efficient
+// evaluation alters the cost model in a backward incompatible manner, hence
+// the versioned rollout.
 //
-//	msg.?elements.optMap(e, e.size()).orValue(0)
+//	<optional(T)>.optMap(<varName>, <expr>) -> <optional(U)>
+//
+// Examples:
+//
+//	optional.of(2).optMap(i, i * 2).value() == 4
+//	optional.none().optMap(i, i * 2) == optional.none()
 //
 // # OptFlatMap
 //
 // Introduced in version: 1
 //
-// Apply a transformation to the optional's underlying value if it is not empty
-// and return the result. The transform expression must return an optional(T)
-// rather than type T. This can be useful when dealing with zero values and
-// conditionally generating an empty or non-empty result in ways which cannot
-// be expressed with `optMap`.
+// Applies a transformation to the optional's value if it holds one, and returns
+// the result. Unlike `optMap`, the transformation must itself produce an
+// optional, which makes it possible to express results that may be empty in ways
+// `optMap` cannot. Starting in **OptionalTypes library version 4**, `optFlatMap`
+// avoids evaluating complex target expressions more than once. The change for more
+// efficient evaluation alters the cost model in a backward incompatible manner,
+// hence the versioned rollout.
 //
-//	msg.?elements.optFlatMap(e, e[?0]) // return the first element if present.
+//	<optional(T)>.optFlatMap(<varName>, <expr>) -> <optional(U)>
+//
+// Examples:
+//
+//	{'key': {'sub': 'value'}}.?key.optFlatMap(k, k.?sub).value() == 'value'
+//	{'key': {}}.?key.optFlatMap(k, k.?sub) == optional.none()
 //
 // # First
 //
@@ -345,7 +359,7 @@ func (*stdLibrary) ProgramOptions() []ProgramOption {
 // Returns an optional with the first value from the right hand list, or
 // optional.None.
 //
-// [1, 2, 3].first().value() == 1
+//	[1, 2, 3].first().value() == 1
 //
 // # Last
 //
@@ -354,7 +368,7 @@ func (*stdLibrary) ProgramOptions() []ProgramOption {
 // Returns an optional with the last value from the right hand list, or
 // optional.None.
 //
-// [1, 2, 3].last().value() == 3
+//	[1, 2, 3].last().value() == 3
 //
 // This is syntactic sugar for msg.elements[msg.elements.size()-1].
 //
@@ -375,9 +389,9 @@ func (*stdLibrary) ProgramOptions() []ProgramOption {
 // Determine whether the optional contains a value equal to the argument, which
 // is equivalent to the expression `opt.hasValue() ? opt.value() == v : false`.
 //
-// optional.of(42).hasValue(42) // true
-// optional.of(42).hasValue(21) // false
-// optional.none().hasValue(42) // false
+//	optional.of(42).hasValue(42) // true
+//	optional.of(42).hasValue(21) // false
+//	optional.none().hasValue(42) // false
 //
 // The argument is compared against the value held by the optional and is never
 // unwrapped, so an optional_type(T) argument is only equal to the value of an
@@ -385,9 +399,9 @@ func (*stdLibrary) ProgramOptions() []ProgramOption {
 // but when the argument is dyn-typed the comparison is deferred to runtime
 // where a type mismatch evaluates to false, just as it would for `==`.
 //
-// optional.of(optional.of(42)).hasValue(optional.of(42)) // true
-// optional.of(42).hasValue(dyn(optional.of(42)))         // false
-// optional.of(42).hasValue(dyn(42))                      // true
+//	optional.of(optional.of(42)).hasValue(optional.of(42)) // true
+//	optional.of(42).hasValue(dyn(optional.of(42)))         // false
+//	optional.of(42).hasValue(dyn(42))                      // true
 func OptionalTypes(opts ...OptionalTypesOption) EnvOption {
 	lib := &optionalLib{version: math.MaxUint32}
 	for _, opt := range opts {
@@ -443,6 +457,11 @@ func (lib *optionalLib) CompileOptions() []EnvOption {
 	mapTypeKV := MapType(paramTypeK, paramTypeV)
 	listOptionalTypeV := ListType(optionalTypeV)
 
+	optMapMacroExpander := optMap
+	if lib.version >= 4 {
+		optMapMacroExpander = optMapV2
+	}
+
 	opts := []EnvOption{
 		// Enable the optional syntax in the parser.
 		enableOptionalSyntax(),
@@ -451,7 +470,7 @@ func (lib *optionalLib) CompileOptions() []EnvOption {
 		Types(types.OptionalType),
 
 		// Configure the optMap and optFlatMap macros.
-		Macros(ReceiverMacro(optMapMacro, 2, optMap,
+		Macros(ReceiverMacro(optMapMacro, 2, optMapMacroExpander,
 			MacroDocs(`perform computation on the value if present and return the result as an optional`),
 			MacroExamples(
 				common.MultilineDescription(
@@ -555,7 +574,11 @@ func (lib *optionalLib) CompileOptions() []EnvOption {
 			Overload("optional_map_index_value", []*Type{OptionalType(mapTypeKV), paramTypeK}, optionalTypeV)),
 	}
 	if lib.version >= 1 {
-		opts = append(opts, Macros(ReceiverMacro(optFlatMapMacro, 2, optFlatMap,
+		optFlatMapMacroExpander := optFlatMap
+		if lib.version >= 4 {
+			optFlatMapMacroExpander = optFlatMapV2
+		}
+		opts = append(opts, Macros(ReceiverMacro(optFlatMapMacro, 2, optFlatMapMacroExpander,
 			MacroDocs(`perform computation on the value if present and produce an optional value within the computation`),
 			MacroExamples(
 				common.MultilineDescription(
@@ -733,6 +756,34 @@ func optMap(meh MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *
 		return nil, meh.NewError(varIdent.ID(), "optMap() variable name must be a simple identifier")
 	}
 	mapExpr := args[1]
+	return meh.NewCall(
+		operators.Conditional,
+		meh.NewMemberCall(hasValueFunc, target),
+		meh.NewCall(optionalOfFunc,
+			meh.NewComprehension(
+				meh.NewList(),
+				unusedIterVar,
+				varName,
+				meh.NewMemberCall(valueFunc, meh.Copy(target)),
+				meh.NewLiteral(types.False),
+				meh.NewIdent(varName),
+				mapExpr,
+			),
+		),
+		meh.NewCall(optionalNoneFunc),
+	), nil
+}
+
+func optMapV2(meh MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *Error) {
+	varIdent := args[0]
+	varName := ""
+	switch varIdent.Kind() {
+	case ast.IdentKind:
+		varName = varIdent.AsIdent()
+	default:
+		return nil, meh.NewError(varIdent.ID(), "optMap() variable name must be a simple identifier")
+	}
+	mapExpr := args[1]
 	targetIdent := target
 	if target.Kind() != ast.IdentKind {
 		targetIdent = meh.NewIdent(targetVar)
@@ -768,6 +819,32 @@ func optMap(meh MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *
 }
 
 func optFlatMap(meh MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *Error) {
+	varIdent := args[0]
+	varName := ""
+	switch varIdent.Kind() {
+	case ast.IdentKind:
+		varName = varIdent.AsIdent()
+	default:
+		return nil, meh.NewError(varIdent.ID(), "optFlatMap() variable name must be a simple identifier")
+	}
+	mapExpr := args[1]
+	return meh.NewCall(
+		operators.Conditional,
+		meh.NewMemberCall(hasValueFunc, target),
+		meh.NewComprehension(
+			meh.NewList(),
+			unusedIterVar,
+			varName,
+			meh.NewMemberCall(valueFunc, meh.Copy(target)),
+			meh.NewLiteral(types.False),
+			meh.NewIdent(varName),
+			mapExpr,
+		),
+		meh.NewCall(optionalNoneFunc),
+	), nil
+}
+
+func optFlatMapV2(meh MacroExprFactory, target ast.Expr, args []ast.Expr) (ast.Expr, *Error) {
 	varIdent := args[0]
 	varName := ""
 	switch varIdent.Kind() {
