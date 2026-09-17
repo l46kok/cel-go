@@ -23,6 +23,7 @@ import (
 	"cel.dev/cel-go/cel/async"
 	"cel.dev/cel-go/common/ast"
 	"cel.dev/cel-go/common/cost"
+	"cel.dev/cel-go/common/functions"
 	"cel.dev/cel-go/common/operators"
 	"cel.dev/cel-go/common/overloads"
 	"cel.dev/cel-go/common/types"
@@ -113,6 +114,52 @@ func NoVars() Activation {
 func PartialVars(vars any,
 	unknowns ...*AttributePatternType) (PartialActivation, error) {
 	return interpreter.NewPartialActivation(vars, unknowns...)
+}
+
+// FunctionActivation extends the Activation interface with implementations for the functions
+// declared with a late binding.
+type FunctionActivation = interpreter.FunctionActivation
+
+// LateBoundFunction is the signature required of all late-bound function implementations.
+//
+// The overload id indicates which of the declared overloads matched the call arguments, which
+// permits a single implementation to serve all overloads of the function.
+//
+// An implementation which depends on the state of the evaluation should capture that state in a
+// closure, as the activation is not an input to the call.
+type LateBoundFunction = functions.LateBoundOp
+
+// FunctionVars returns a FunctionActivation combining the variable bindings from `vars` with
+// the late-bound function implementations from `funcs`. FunctionVars support late-bound function
+// definitions where the function behavior depends on the context of the evaluation. This can only
+// be accomplished by closing over state that is not otherwise exposed to the CEL author or CEL
+// runtime.
+//
+// - Function bindings occupy a namespace separate from variables, allowing a function and a
+// variable to share the same qualified name.
+// - The `vars` argument may be an Activation or any valid input to NewActivation (e.g. map[string]any).
+// - FunctionVars may not be nested, and only one instance of FunctionVars may be supplied to an
+// evaluation. FunctionVars returns an error if `vars` already contains function bindings.
+//
+// Function implementations can capture evaluation-scoped state via closures without exposing that
+// state directly as expression variables:
+//
+//	roles := map[string]string{"tristan": "admin"}
+//	act, err := cel.FunctionVars(map[string]any{"user": "tristan"}, map[string]cel.LateBoundFunction{
+//	    "role": func(overloadID string, args ...ref.Val) ref.Val {
+//	        role, found := roles[string(args[0].(types.String))]
+//	        if !found {
+//	            return types.NewErr("no role for user: %s", args[0])
+//	        }
+//	        return types.String(role)
+//	    },
+//	})
+//
+// CEL expects that late-bound functions, like regular functions, yield the same output given the same
+// input. For example, a function comparing a validity window `valid_until(t)` could be implemented as
+// a late-bound function closed over a fixed timestamp value.
+func FunctionVars(vars any, funcs map[string]LateBoundFunction) (FunctionActivation, error) {
+	return interpreter.NewFunctionActivation(vars, funcs)
 }
 
 // AttributePattern returns an AttributePattern that matches a top-level variable. The pattern is
@@ -503,9 +550,11 @@ func (p *prog) newExecutionFrame(input any) (*interpreter.ExecutionFrame, error)
 		return nil, err
 	}
 	if p.defaultVars != nil {
-		frame.SetDefaultVars(p.defaultVars)
+		if err := frame.SetDefaultVars(p.defaultVars); err != nil {
+			frame.Close()
+			return nil, err
+		}
 	}
-
 	return frame, nil
 }
 
