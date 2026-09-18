@@ -1121,28 +1121,3 @@ func TestAsyncSetupWithoutContextErrors(t *testing.T) {
 		t.Error("SetAsyncMaxConcurrency() succeeded without context, wanted error")
 	}
 }
-
-func BenchmarkHashCallSmall(b *testing.B) {
-	args := []ref.Val{types.String("user:12345"), types.Int(42)}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = hashCall(101, overloads.ContainsString, args)
-	}
-}
-
-func BenchmarkHashCallWide(b *testing.B) {
-	args := []ref.Val{
-		types.String("//cloudresourcemanager.googleapis.com/projects/123456789"),
-		types.String("iam.googleapis.com/ServiceAccount"),
-		types.Int(9007199254740993),
-		types.Double(3.14159),
-		types.Bool(true),
-		types.DefaultTypeAdapter.NativeToValue(map[string]any{"a": 1}),
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = hashCall(101, overloads.ContainsString, args)
-	}
-}
