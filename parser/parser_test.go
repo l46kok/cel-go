@@ -3232,7 +3232,7 @@ func TestRecursionLimit(t *testing.T) {
 			name:                   "GroupingParensAroundCalcChain",
 			source:                 "(((1 + 2 + 3 + 4 + (5 + 6))))",
 			antlrMinRecursionDepth: 7,
-			prattMinRecursionDepth: 5,
+			prattMinRecursionDepth: 4,
 		},
 		{
 			name:                   "ParenthesizedLhsCalc",
@@ -3359,6 +3359,66 @@ func TestRecursionLimit(t *testing.T) {
 			source:                 "a.b.c.d.e + f.g",
 			antlrMinRecursionDepth: 5,
 			prattMinRecursionDepth: 5,
+		},
+		{
+			name:                   "UnaryNegateWithCalcAndSelectors",
+			source:                 "-a.b / c.d - e.f",
+			antlrMinRecursionDepth: 3,
+			prattMinRecursionDepth: 3,
+		},
+		{
+			name:                   "ParenthesizedCalcChain",
+			source:                 "(1 + 1 + 1 + 1 + 1)",
+			antlrMinRecursionDepth: 4,
+			prattMinRecursionDepth: 4,
+		},
+		{
+			name:                   "ListElementFieldSelections",
+			source:                 "[a.b.c.d.e]",
+			antlrMinRecursionDepth: 4,
+			prattMinRecursionDepth: 4,
+		},
+		{
+			name:                   "NestedMapValueFieldSelections",
+			source:                 "{1: {2: {3: a.b.c}}}",
+			antlrMinRecursionDepth: 4,
+			prattMinRecursionDepth: 4,
+		},
+		{
+			name:                   "QualifiedStructName",
+			source:                 "a" + strings.Repeat(".b", depth+1) + ".Msg{f: x}",
+			antlrMinRecursionDepth: 2,
+			prattMinRecursionDepth: 2,
+		},
+		{
+			name:                   "QualifiedStructNameWithFieldSelections",
+			source:                 "a" + strings.Repeat(".b", depth+1) + ".Msg{f: x.y.z}.g",
+			antlrMinRecursionDepth: 3,
+			prattMinRecursionDepth: 3,
+		},
+		{
+			name:                   "CalcWithTrailingFieldSelections",
+			source:                 "x + a.b.c.d.e",
+			antlrMinRecursionDepth: 5,
+			prattMinRecursionDepth: 5,
+		},
+		{
+			name:                   "ConditionalWithFieldSelections",
+			source:                 "a.b.c.d ? x : y",
+			antlrMinRecursionDepth: 4,
+			prattMinRecursionDepth: 4,
+		},
+		{
+			name:                   "ParenthesizedConditionalWithCalc",
+			source:                 "(a ? b : c) + 1 + 1 + 1",
+			antlrMinRecursionDepth: 4,
+			prattMinRecursionDepth: 4,
+		},
+		{
+			name:                   "ParenthesizedCalcWithUnaryNegateAndLogicalOr",
+			source:                 "(-a.b / c.d - e.f || x)",
+			antlrMinRecursionDepth: 3,
+			prattMinRecursionDepth: 3,
 		},
 	}
 
